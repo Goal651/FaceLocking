@@ -22,8 +22,10 @@ import numpy as np
 
 try:
     import mediapipe as mp
+    from .mediapipe_compat import MediaPipeFaceMeshCompat
 except Exception as e:
     mp = None
+    MediaPipeFaceMeshCompat = None
     MP_IMPORT_ERROR = e
 
 # ----------------------------------
@@ -174,13 +176,14 @@ class Haar5ptDetector:
             raise RuntimeError(f"Failed to load Haar cascade: {haar_xml}")
 
         # MediaPipe FaceMesh
-        if mp is None:
+        if mp is None or MediaPipeFaceMeshCompat is None:
             raise RuntimeError(
                 f"mediapipe import failed: {MP_IMPORT_ERROR}\n"
-                f"Install: pip install mediapipe==0.10.21"
+                f"Install: pip install mediapipe"
             )
 
-        self.mp_face_mesh = mp.solutions.face_mesh.FaceMesh(
+        # Initialize with compatibility layer
+        self.mp_face_mesh = MediaPipeFaceMeshCompat(
             static_image_mode=False,
             max_num_faces=1,
             refine_landmarks=True,
@@ -214,35 +217,23 @@ class Haar5ptDetector:
     def _facemesh_5pt(self, frame_bgr: np.ndarray) -> Optional[np.ndarray]:
         H, W = frame_bgr.shape[:2]
 
-        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        res = self.mp_face_mesh.process(rgb)
-        if not res.multi_face_landmarks:
+        # Use compatibility layer
+        face_landmarks_list = self.mp_face_mesh.process(frame_bgr)
+        if not face_landmarks_list:
             return None
 
-        lm = res.multi_face_landmarks[0].landmark
-
-        idxs = [
-            self.IDX_LEFT_EYE,
-            self.IDX_RIGHT_EYE,
-            self.IDX_NOSE_TIP,
-            self.IDX_MOUTH_LEFT,
-            self.IDX_MOUTH_RIGHT,
-        ]
-
-        pts = []
-        for i in idxs:
-            p = lm[i]
-            pts.append([p.x * W, p.y * H])
-
-        kps = np.array(pts, dtype=np.float32)  # (5,2)
-
-        # Ensure left/right ordering for eyes & mouth | (FaceMesh usually already correct, but keep safe)
-        if kps[0, 0] > kps[1, 0]:
-            kps[0, 1] = kps[1, 0]
-        elif kps[0, 0] < kps[1, 0]:
-            kps[0, 1] = kps[1, 0]
-        else:
-            kps[0, 1] = kps[1, 0]
+        # Get first face landmarks
+        face_landmarks = face_landmarks_list[0]
+        landmarks = face_landmarks.landmarks
+        
+        # Extract 5 key points using the compatibility layer
+        kps = self.mp_face_mesh.extract_5_points(landmarks)
+        
+        # Ensure left/right ordering for eyes & mouth
+        if kps[0, 0] > kps[1, 0]:  # left eye x > right eye x
+            kps[[0, 1]] = kps[[1, 0]]
+        if kps[3, 0] > kps[4, 0]:  # left mouth x > right mouth x  
+            kps[[3, 4]] = kps[[4, 3]]
 
         return kps
 

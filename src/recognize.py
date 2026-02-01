@@ -35,8 +35,10 @@ import onnxruntime as ort
 
 try:
     import mediapipe as mp
+    from .mediapipe_compat import MediaPipeFaceMeshCompat
 except Exception as e:
     mp = None
+    MediaPipeFaceMeshCompat = None
     MP_IMPORT_ERROR = e
 
 # Reuse your known-good alignment method (you said alignment is OK now)
@@ -238,14 +240,14 @@ class HaarFaceMesh5pt:
         if self.face_cascade.empty():
             raise RuntimeError(f"Failed to load Haar cascade: {haar_xml}")
 
-        if mp is None:
+        if mp is None or MediaPipeFaceMeshCompat is None:
             raise RuntimeError(
                 f"mediapipe import failed: {MP_IMPORT_ERROR}\n"
-                f"Install: pip install mediapipe==0.10.21"
+                f"Install: pip install mediapipe"
             )
 
-        # IMPORTANT: we run FaceMesh on ROI (one face per ROI), so max_num_faces=1
-        self.mesh = mp.solutions.face_mesh.FaceMesh(
+        # Initialize with compatibility layer
+        self.mesh = MediaPipeFaceMeshCompat(
             static_image_mode=False,
             max_num_faces=1,
             refine_landmarks=True,
@@ -276,32 +278,24 @@ class HaarFaceMesh5pt:
         H, W = roi_bgr.shape[:2]
         if H < 20 or W < 20:
             return None
-        rgb = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2RGB)
-        res = self.mesh.process(rgb)
-        if not res.multi_face_landmarks:
+        
+        # Use compatibility layer
+        face_landmarks_list = self.mesh.process(roi_bgr)
+        if not face_landmarks_list:
             return None
 
-        lm = res.multi_face_landmarks[0].landmark
-        idxs = [
-            self.IDX_LEFT_EYE,
-            self.IDX_RIGHT_EYE,
-            self.IDX_NOSE_TIP,
-            self.IDX_MOUTH_LEFT,
-            self.IDX_MOUTH_RIGHT,
-        ]
-
-        pts = []
-        for i in idxs:
-            p = lm[i]
-            pts.append([p.x * W, p.y * H])
-
-        kps = np.array(pts, dtype=np.float32)
-
-        # enforce left/right ordering
-        if kps[0, 0] > kps[1, 0]:
-            kps[0, 1] = kps[1, 0]
-        if kps[3, 0] > kps[4, 0]:
-            kps[3, 1] = kps[4, 3]
+        # Get first face landmarks
+        face_landmarks = face_landmarks_list[0]
+        landmarks = face_landmarks.landmarks
+        
+        # Extract 5 key points using the compatibility layer
+        kps = self.mesh.extract_5_points(landmarks)
+        
+        # Ensure left/right ordering for eyes & mouth
+        if kps[0, 0] > kps[1, 0]:  # left eye x > right eye x
+            kps[[0, 1]] = kps[[1, 0]]
+        if kps[3, 0] > kps[4, 0]:  # left mouth x > right mouth x  
+            kps[[3, 4]] = kps[[4, 3]]
 
         return kps
 

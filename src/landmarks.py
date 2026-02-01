@@ -12,7 +12,16 @@ Keys:
 
 import cv2
 import numpy as np
-import mediapipe as mp
+try:
+    import mediapipe as mp
+    from src.mediapipe_compat import MediaPipeFaceMeshCompat
+except ImportError:
+    try:
+        from mediapipe_compat import MediaPipeFaceMeshCompat
+        import mediapipe as mp
+    except ImportError:
+        mp = None
+        MediaPipeFaceMeshCompat = None
 
 
 # 5-point indices (FaceMesh)
@@ -30,8 +39,12 @@ def main():
     if face.empty():
         raise RuntimeError(f"Failed to load cascade: {cascade_path}")
 
-    # FaceMesh
-    fm = mp.solutions.face_mesh.FaceMesh(
+    # FaceMesh with compatibility handling
+    if mp is None or MediaPipeFaceMeshCompat is None:
+        print("Error: MediaPipe not available")
+        return
+    
+    fm = MediaPipeFaceMeshCompat(
         static_image_mode=False,
         max_num_faces=1,
         refine_landmarks=True,
@@ -60,31 +73,16 @@ def main():
         for x, y, w, h in faces:
             cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-        # FaceMesh on full frame (simple)
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        res = fm.process(rgb)
+        # FaceMesh on full frame using compatibility layer
+        face_landmarks_list = fm.process(frame)
 
-        if res.multi_face_landmarks:
-            lm = res.multi_face_landmarks[0].landmark
-            idxs = [
-                IDX_LEFT_EYE,
-                IDX_RIGHT_EYE,
-                IDX_NOSE_TIP,
-                IDX_MOUTH_LEFT,
-                IDX_MOUTH_RIGHT,
-            ]
-
-            pts = []
-            for i in idxs:
-                p = lm[i]
-                pts.append([p.x * W, p.y * H])
-            kps = np.array(pts, dtype=np.float32)  # (5,2)
-
-            # enforce left/right ordering
-            if kps[0, 0] > kps[1, 0]:
-                kps[[0, 1]] = kps[[1, 0]]
-            if kps[3, 0] > kps[4, 0]:
-                kps[[3, 4]] = kps[[4, 3]]
+        if face_landmarks_list:
+            # Get first face landmarks
+            face_landmarks = face_landmarks_list[0]
+            landmarks = face_landmarks.landmarks
+            
+            # Extract 5 key points using the compatibility layer
+            kps = fm.extract_5_points(landmarks)
 
             # draw 5 points
             for px, py in kps.astype(int):
