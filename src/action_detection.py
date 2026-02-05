@@ -49,8 +49,10 @@ class AdvancedActionDetector:
         self.eye_closed_threshold = 0.2
         
         # Smile detection parameters  
-        self.smile_ratio_threshold = 1.8
-        self.smile_consecutive_frames = 3
+        self.smile_ratio_threshold = 1.2  # adjusted for combined score
+        self.smile_consecutive_frames = 2  # reduced for more responsive detection
+        self.smile_width_threshold = 0.15  # minimum normalized mouth width
+        self.smile_elevation_threshold = -2  # mouth corner elevation (negative = up)
         
         # State tracking
         self.blink_frame_counter = 0
@@ -141,7 +143,7 @@ class AdvancedActionDetector:
     
     def detect_smile_advanced(self, landmarks: np.ndarray, frame_time: float) -> Tuple[bool, MouthMetrics]:
         """
-        Advanced smile detection using mouth geometry
+        Advanced smile detection using improved mouth geometry
         
         Args:
             landmarks: (5, 2) array with facial landmarks
@@ -155,30 +157,61 @@ class AdvancedActionDetector:
             left_mouth = landmarks[3]   # left mouth corner
             right_mouth = landmarks[4]  # right mouth corner
             nose = landmarks[2]         # nose tip
+            left_eye = landmarks[0]     # left eye center
+            right_eye = landmarks[1]    # right eye center
             
             # Calculate mouth dimensions
             mouth_width = np.linalg.norm(right_mouth - left_mouth)
             mouth_center = (left_mouth + right_mouth) / 2
             
-            # Estimate mouth height using nose reference
-            mouth_height = abs(mouth_center[1] - nose[1]) * 0.3  # approximation
+            # Calculate face width for normalization
+            face_width = np.linalg.norm(right_eye - left_eye)
             
-            # Calculate mouth aspect ratio (width/height)
+            # Improved mouth height estimation using multiple reference points
+            # Use distance from mouth center to nose as primary reference
+            mouth_to_nose_dist = np.linalg.norm(mouth_center - nose)
+            
+            # Calculate eye-line to mouth distance for better height estimation
+            eye_center = (left_eye + right_eye) / 2
+            eye_to_mouth_dist = np.linalg.norm(mouth_center - eye_center)
+            
+            # Estimate mouth height using facial proportions
+            mouth_height = mouth_to_nose_dist * 0.4  # improved approximation
+            
+            # Normalize mouth width by face width for better consistency
+            normalized_mouth_width = mouth_width / max(face_width, 1.0)
+            
+            # Calculate multiple smile indicators
             mouth_ratio = mouth_width / max(mouth_height, 1.0)
+            width_to_face_ratio = normalized_mouth_width
+            
+            # Mouth corner elevation detection
+            # Check if mouth corners are elevated relative to mouth center
+            left_elevation = left_mouth[1] - mouth_center[1]  # negative means elevated
+            right_elevation = right_mouth[1] - mouth_center[1]
+            avg_elevation = (left_elevation + right_elevation) / 2
+            
+            # Combined smile score using multiple factors
+            smile_score = (
+                mouth_ratio * 0.4 +                    # mouth width/height ratio
+                width_to_face_ratio * 3.0 +            # normalized width
+                max(0, -avg_elevation / 5.0) * 0.6     # corner elevation bonus
+            )
             
             # Add to history for smoothing
-            self.mouth_ratio_history.append(mouth_ratio)
+            self.mouth_ratio_history.append(smile_score)
             
-            # Smooth the ratio
+            # Smooth the score
             if len(self.mouth_ratio_history) >= 3:
-                smoothed_ratio = np.mean(list(self.mouth_ratio_history)[-3:])
+                smoothed_score = np.mean(list(self.mouth_ratio_history)[-3:])
             else:
-                smoothed_ratio = mouth_ratio
+                smoothed_score = smile_score
             
-            # Detect smile
+            # Detect smile with improved threshold
             smile_detected = False
+            smile_threshold = 1.2  # adjusted threshold for combined score
             
-            if smoothed_ratio > self.smile_ratio_threshold:
+            if smoothed_score > smile_threshold:
                 self.smile_frame_counter += 1
                 if self.smile_frame_counter >= self.smile_consecutive_frames:
                     smile_detected = True
@@ -189,13 +222,13 @@ class AdvancedActionDetector:
             metrics = MouthMetrics(
                 mouth_width=mouth_width,
                 mouth_height=mouth_height,
-                mouth_ratio=smoothed_ratio,
+                mouth_ratio=smoothed_score,  # using combined score
                 smile_detected=smile_detected
             )
             
             return smile_detected, metrics
             
-        except Exception:
+        except Exception as e:
             return False, MouthMetrics(0, 0, 0, False)
     
     def detect_movement_advanced(self, current_pos: Tuple[int, int], 

@@ -191,7 +191,7 @@ def main():
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         raise RuntimeError("Failed to open camera.")
-
+    
     cv2.namedWindow(cfg.window_main, cv2.WINDOW_NORMAL)
     cv2.namedWindow(cfg.window_aligned, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(cfg.window_aligned, 240, 240)
