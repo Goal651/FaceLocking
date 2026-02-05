@@ -132,9 +132,12 @@ class FaceLockingSystem:
         self.ui_alpha = 0.8  # transparency for UI elements
 
         # Face detection settings to avoid mouth detection
-        self.min_face_size = (80, 80)  # Increased minimum face size
-        self.max_face_size = (400, 400)  # Maximum face size to avoid false positives
-        self.face_aspect_ratio_range = (0.7, 1.4)  # Valid face aspect ratios
+        self.min_face_size = (
+            100,
+            100,
+        )  # Further increased min face size for performance
+        self.max_face_size = (400, 400)
+        self.face_aspect_ratio_range = (0.7, 1.4)
 
         # Initialize components with improved settings
         self.detector = HaarFaceMesh5pt(min_size=self.min_face_size, debug=False)
@@ -144,11 +147,17 @@ class FaceLockingSystem:
         db = load_db_npz(self.db_path)
         self.matcher = FaceDBMatcher(db=db, dist_thresh=0.34)
 
-        # Face tracking
+        # Face tracking & Recognition optimization
         self.tracker: Optional[FaceTracker] = None
         self.is_locked = False
         self.frame_count = 0
         self.lock_timeout = 30  # frames to wait before releasing lock
+        self.recognition_interval = 10  # frames between heavy AI recognition
+
+        # Identity cache for non-locked faces
+        # Format: {(center_x, center_y): (MatchResult, frame_count)}
+        self.identity_cache = {}
+        self.cache_distance_threshold = 80  # pixels to consider same face
 
         # Action detection
         self.action_detector = AdvancedActionDetector()
@@ -276,6 +285,29 @@ class FaceLockingSystem:
 
         # Allow some movement but not too much
         return distance < 100  # pixels
+
+    def _get_cached_identity(self, face: FaceDet) -> Optional[MatchResult]:
+        """Try to retrieve recognized identity from cache based on spatial proximity"""
+        center = self._get_face_center(face)
+
+        # Clean up old entries
+        current_frame = self.frame_count
+        self.identity_cache = {
+            pos: val
+            for pos, val in self.identity_cache.items()
+            if current_frame - val[1] < 5
+        }
+
+        for pos, (result, frame) in self.identity_cache.items():
+            dist = np.sqrt((center[0] - pos[0]) ** 2 + (center[1] - pos[1]) ** 2)
+            if dist < self.cache_distance_threshold:
+                return result
+        return None
+
+    def _update_cache(self, face: FaceDet, result: MatchResult):
+        """Store recognized identity in cache"""
+        center = self._get_face_center(face)
+        self.identity_cache[center] = (result, self.frame_count)
 
     def _record_action(
         self, action_type: str, description: str, value: Optional[float] = None
@@ -433,22 +465,45 @@ class FaceLockingSystem:
 
         # Process all faces in the frame
         for face in faces:
-            # Recognize each face
-            aligned, _ = align_face_5pt(frame, face.kps, out_size=(112, 112))
-            emb = self.embedder.embed(aligned)
-            match_result = self.matcher.match(emb)
+            # Check if this is our locked target by position first
+            is_possible_target = self._is_same_face(face, self.tracker)
 
-            # Check if this is our locked target
+            # Decide if we need heavy recognition
+            needs_recognition = self.frame_count % self.recognition_interval == 0
+
+            match_result = None
+            if is_possible_target and not needs_recognition:
+                # Reuse target identity for locked face to save CPU
+                match_result = MatchResult(
+                    name=self.target_identity,
+                    distance=0.0,
+                    similarity=np.mean(list(self.tracker.confidence_history))
+                    if self.tracker.confidence_history
+                    else 0.8,
+                    accepted=True,
+                )
+            else:
+                # Check cache first
+                match_result = self._get_cached_identity(face)
+
+            if match_result is None:
+                # Fallback to expensive recognition
+                aligned, _ = align_face_5pt(frame, face.kps, out_size=(112, 112))
+                emb = self.embedder.embed(aligned)
+                match_result = self.matcher.match(emb)
+                self._update_cache(face, match_result)
+
+            # Re-verify locked status with match result
             is_locked_target = (
-                self._is_same_face(face, self.tracker)
+                is_possible_target
                 and match_result.accepted
                 and match_result.name == self.target_identity
             )
 
             if is_locked_target:
                 target_face = face
-                self.tracker.confidence_history.append(match_result.similarity)
-                # Draw locked face (will be done separately)
+                if needs_recognition:
+                    self.tracker.confidence_history.append(match_result.similarity)
             else:
                 # Draw unlocked faces
                 self._draw_unlocked_face(vis, face, match_result)
@@ -533,10 +588,15 @@ class FaceLockingSystem:
     ):
         """Search for target identity to lock onto and display all faces with clean UI"""
         for face in faces:
-            # Recognize face
-            aligned, _ = align_face_5pt(frame, face.kps, out_size=(112, 112))
-            emb = self.embedder.embed(aligned)
-            match_result = self.matcher.match(emb)
+            # Try cache first
+            match_result = self._get_cached_identity(face)
+
+            if match_result is None:
+                # Recognize face (expensive)
+                aligned, _ = align_face_5pt(frame, face.kps, out_size=(112, 112))
+                emb = self.embedder.embed(aligned)
+                match_result = self.matcher.match(emb)
+                self._update_cache(face, match_result)
 
             # Determine face status and colors
             is_target = (
@@ -966,6 +1026,7 @@ class FaceLockingSystem:
         """Reload face database"""
         db = load_db_npz(self.db_path)
         self.matcher.reload_from(self.db_path)
+        self.identity_cache = {}  # Clear cache on reload
         print(f"Database reloaded: {len(db)} identities")
 
 
