@@ -43,7 +43,10 @@ The system uses the **ArcFace ResNet-50** model. Download and place it in the `m
 python init_project.py
 
 # Download ArcFace ONNX
-curl -L -o models/embedder_arcface.onnx "https://path-to-your-model-storage/w600k_r50.onnx"
+curl -L -o buffalo_l.zip "https://sourceforge.net/projects/insightface.mirror/files/v0.7/buffalo_l.zip/download"
+unzip -o buffalo_l.zip
+cp w600k_r50.onnx models/embedder_arcface.onnx
+rm buffalo_l.zip *.onnx
 ```
 
 ### 3. Usage
