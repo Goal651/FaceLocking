@@ -24,7 +24,6 @@ Since embeddings are L2-normalized, cosine similarity = dot(a,b).
 from __future__ import annotations
 
 import time
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -278,7 +277,7 @@ class HaarFaceMesh5pt:
         H, W = roi_bgr.shape[:2]
         if H < 20 or W < 20:
             return None
-        
+
         # Use compatibility layer
         face_landmarks_list = self.mesh.process(roi_bgr)
         if not face_landmarks_list:
@@ -287,14 +286,14 @@ class HaarFaceMesh5pt:
         # Get first face landmarks
         face_landmarks = face_landmarks_list[0]
         landmarks = face_landmarks.landmarks
-        
+
         # Extract 5 key points using the compatibility layer
         kps = self.mesh.extract_5_points(landmarks)
-        
+
         # Ensure left/right ordering for eyes & mouth
         if kps[0, 0] > kps[1, 0]:  # left eye x > right eye x
             kps[[0, 1]] = kps[[1, 0]]
-        if kps[3, 0] > kps[4, 0]:  # left mouth x > right mouth x  
+        if kps[3, 0] > kps[4, 0]:  # left mouth x > right mouth x
             kps[[3, 4]] = kps[[4, 3]]
 
         return kps
@@ -412,7 +411,7 @@ def main():
     db_path = Path("data/db/face_db.npz")
 
     det = HaarFaceMesh5pt(
-        min_size=(70, 70),
+        min_size=(100, 100),  # Increased min_size to reduce noise
         debug=False,
     )
 
@@ -436,10 +435,18 @@ def main():
     fps: Optional[float] = None
     show_debug = False
 
+    # Recognition optimization
+    # Format: {(center_x, center_y): (MatchResult, frame_count)}
+    identity_cache = {}
+    recognition_interval = 10  # frames between heavy AI re-checks
+    frame_idx = 0
+    cache_dist_thresh = 80  # pixels
+
     while True:
         ok, frame = cap.read()
         if not ok:
             break
+        frame_idx += 1
 
         faces = det.detect(frame, max_faces=5)
         vis = frame.copy()
@@ -462,15 +469,43 @@ def main():
         shown = 0
 
         for i, f in enumerate(faces):
-            # draw bbox + kps
-            cv2.rectangle(vis, (f.x1, f.y1), (f.x2, f.y2), (0, 255, 0), 2)
-            for x, y in f.kps.astype(int):
-                cv2.circle(vis, (int(x), int(y)), 2, (0, 255, 0), -1)
+            center = ((f.x1 + f.x2) // 2, (f.y1 + f.y2) // 2)
 
-            # align -> embed -> match
-            aligned, _ = align_face_5pt(frame, f.kps, out_size=(112, 112))
-            emb = embedder.embed(aligned)
-            mr = matcher.match(emb)
+            # 1. Try to find identity in cache
+            mr = None
+            needs_recognition = frame_idx % recognition_interval == 0
+
+            # Clean up old cache entries
+            identity_cache = {
+                pos: val
+                for pos, val in identity_cache.items()
+                if frame_idx - val[1] < 5
+            }
+
+            if not needs_recognition:
+                # Spatial proximity check
+                for pos, (cached_mr, last_fidx) in identity_cache.items():
+                    dist = np.sqrt(
+                        (center[0] - pos[0]) ** 2 + (center[1] - pos[1]) ** 2
+                    )
+                    if dist < cache_dist_thresh:
+                        mr = cached_mr
+                        break
+
+            # 2. If not found or interval hit, do heavy recognition
+            if mr is None:
+                # align -> embed -> match
+                aligned, _ = align_face_5pt(frame, f.kps, out_size=(112, 112))
+                emb = embedder.embed(aligned)
+                mr = matcher.match(emb)
+
+                # Update cache
+                identity_cache[center] = (mr, frame_idx)
+            else:
+                # Still need 'aligned' for preview thumbnails if it's new
+                # but we can reuse the cached mr.
+                # Only align if we actually need the thumbnail
+                aligned, _ = align_face_5pt(frame, f.kps, out_size=(112, 112))
 
             # label
             label = mr.name if mr.name is not None else "Unknown"
@@ -479,6 +514,11 @@ def main():
 
             # color: known green, unknown red
             color = (0, 255, 0) if mr.accepted else (0, 0, 255)
+
+            # draw bbox + kps
+            cv2.rectangle(vis, (f.x1, f.y1), (f.x2, f.y2), color, 2)
+            for x, y in f.kps.astype(int):
+                cv2.circle(vis, (int(x), int(y)), 2, color, -1)
 
             cv2.putText(
                 vis,
@@ -542,6 +582,7 @@ def main():
             break
         elif key == ord("r"):
             matcher.reload_from(db_path)
+            identity_cache = {}  # Clear cache on reload
             print(f"[recognize] reloaded DB: {len(matcher._names)} identities")
         elif key in (ord("+"), ord("=")):
             matcher.dist_thresh = float(min(1.20, matcher.dist_thresh + 0.01))
